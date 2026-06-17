@@ -13,6 +13,7 @@ Tools:
 """
 
 import os
+import re
 
 from dotenv import load_dotenv
 from groq import Groq
@@ -20,6 +21,8 @@ from groq import Groq
 from utils.data_loader import load_listings
 
 load_dotenv()
+
+LLM_MODEL = "llama-3.3-70b-versatile"
 
 
 # ── Groq client ───────────────────────────────────────────────────────────────
@@ -32,6 +35,35 @@ def _get_groq_client():
             "GROQ_API_KEY not set. Add it to a .env file in the project root."
         )
     return Groq(api_key=api_key)
+
+
+def _call_llm(prompt: str, temperature: float = 0.7) -> str:
+    """Call the Groq LLM and return the response text."""
+    client = _get_groq_client()
+    response = client.chat.completions.create(
+        model=LLM_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=temperature,
+        max_tokens=512,
+    )
+    return response.choices[0].message.content.strip()
+
+
+def _tokenize(text: str) -> list[str]:
+    """Split text into lowercase keyword tokens."""
+    return [t for t in re.split(r"[^\w]+", text.lower()) if len(t) > 1]
+
+
+def _score_listing(listing: dict, keywords: list[str]) -> int:
+    """Score a listing by keyword overlap across searchable fields."""
+    searchable = " ".join([
+        listing.get("title", ""),
+        listing.get("description", ""),
+        listing.get("category", ""),
+        " ".join(listing.get("style_tags", [])),
+    ]).lower()
+
+    return sum(1 for kw in keywords if kw in searchable)
 
 
 # ── Tool 1: search_listings ───────────────────────────────────────────────────
@@ -69,8 +101,24 @@ def search_listings(
 
     Before writing code, fill in the Tool 1 section of planning.md.
     """
-    # Replace this with your implementation
-    return []
+    listings = load_listings()
+    keywords = _tokenize(description)
+
+    if not keywords:
+        return []
+
+    filtered = []
+    for listing in listings:
+        if max_price is not None and listing["price"] > max_price:
+            continue
+        if size is not None and size.lower() not in listing["size"].lower():
+            continue
+        score = _score_listing(listing, keywords)
+        if score > 0:
+            filtered.append((score, listing))
+
+    filtered.sort(key=lambda x: x[0], reverse=True)
+    return [listing for _, listing in filtered]
 
 
 # ── Tool 2: suggest_outfit ────────────────────────────────────────────────────
@@ -100,8 +148,53 @@ def suggest_outfit(new_item: dict, wardrobe: dict) -> str:
 
     Before writing code, fill in the Tool 2 section of planning.md.
     """
-    # Replace this with your implementation
-    return ""
+    items = wardrobe.get("items", [])
+    title = new_item.get("title", "this item")
+    tags = ", ".join(new_item.get("style_tags", []))
+    colors = ", ".join(new_item.get("colors", []))
+    category = new_item.get("category", "item")
+
+    try:
+        if not items:
+            prompt = f"""You are a personal stylist. A user found this thrifted item and has no wardrobe saved yet.
+
+Item: {title}
+Category: {category}
+Style tags: {tags}
+Colors: {colors}
+
+Suggest general styling ideas — what types of pieces pair well with this item, what vibe it suits, and 1-2 complete outfit directions they could build. Be specific and practical. Keep it to 3-5 sentences."""
+        else:
+            wardrobe_lines = "\n".join(
+                f"- {item['name']} ({item['category']}, {', '.join(item['style_tags'])})"
+                for item in items
+            )
+            prompt = f"""You are a personal stylist. A user found this thrifted item and wants outfit ideas using their existing wardrobe.
+
+New item: {title}
+Category: {category}
+Style tags: {tags}
+Colors: {colors}
+
+Their wardrobe:
+{wardrobe_lines}
+
+Suggest 1-2 complete outfit combinations using the new item and specific pieces from their wardrobe by name. Include a styling tip (tucking, rolling sleeves, layering, etc.). Keep it to 3-5 sentences."""
+
+        return _call_llm(prompt, temperature=0.7)
+
+    except Exception:
+        tag_hint = tags if tags else category
+        if items:
+            names = ", ".join(item["name"] for item in items[:3])
+            return (
+                f"Pair {title} with pieces from your wardrobe like {names}. "
+                f"The {tag_hint} vibe works well with relaxed, layered looks."
+            )
+        return (
+            f"This {category} has a {tag_hint} feel — try pairing it with "
+            f"relaxed denim and chunky sneakers for an easy everyday look."
+        )
 
 
 # ── Tool 3: create_fit_card ───────────────────────────────────────────────────
@@ -133,5 +226,35 @@ def create_fit_card(outfit: str, new_item: dict) -> str:
 
     Before writing code, fill in the Tool 3 section of planning.md.
     """
-    # Replace this with your implementation
-    return ""
+    if not outfit or not outfit.strip():
+        return (
+            "Can't create a fit card without an outfit suggestion. "
+            "Please run outfit styling first."
+        )
+
+    title = new_item.get("title", "this find")
+    price = new_item.get("price", 0)
+    platform = new_item.get("platform", "a thrift app")
+
+    try:
+        prompt = f"""Write a casual Instagram/TikTok caption for someone's outfit of the day. This is a real thrift find, not a product ad.
+
+Item: {title}
+Price: ${price:.0f}
+Platform: {platform}
+Outfit: {outfit}
+
+Rules:
+- 2-4 sentences, casual and authentic (like a real OOTD post)
+- Mention the item, price, and platform naturally once each
+- Capture the vibe in specific terms
+- No hashtags, no "link in bio", no marketing language
+- Sound like a real person sharing their fit"""
+
+        return _call_llm(prompt, temperature=0.95)
+
+    except Exception:
+        return (
+            f"thrifted this {title.lower()} off {platform} for ${price:.0f} "
+            f"and i'm obsessed with how it came together 🖤"
+        )

@@ -18,6 +18,8 @@ Usage (once implemented):
     print(result["error"])   # None on success
 """
 
+import re
+
 from tools import search_listings, suggest_outfit, create_fit_card
 
 
@@ -43,6 +45,63 @@ def _new_session(query: str, wardrobe: dict) -> dict:
         "fit_card": None,            # string returned by create_fit_card
         "error": None,               # set if the interaction ended early
     }
+
+
+def _parse_query(query: str) -> dict:
+    """Extract description, size, and max_price from a natural language query."""
+    text = query.strip()
+    max_price = None
+    size = None
+
+    price_match = re.search(
+        r"(?:under|below|max|less than)\s*\$?\s*(\d+(?:\.\d+)?)",
+        text,
+        re.IGNORECASE,
+    )
+    if price_match:
+        max_price = float(price_match.group(1))
+        text = text[: price_match.start()] + text[price_match.end() :]
+
+    size_match = re.search(
+        r"(?:\b(?:size|in)\s+)+([A-Za-z0-9]+(?:\s*/\s*[A-Za-z0-9]+)?)",
+        text,
+        re.IGNORECASE,
+    )
+    if size_match:
+        size = size_match.group(1).strip()
+        text = text[: size_match.start()] + text[size_match.end() :]
+
+    description = re.sub(
+        r"\b(?:i\s+mostly\s+wear|what'?s\s+out\s+there|how\s+would\s+i\s+style\s+it)\b.*",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    description = re.sub(r"\s+", " ", description).strip(" .,;")
+    if not description:
+        description = query.strip()
+
+    return {
+        "description": description,
+        "size": size,
+        "max_price": max_price,
+    }
+
+
+def _no_results_message(parsed: dict) -> str:
+    """Build a helpful error message when search returns no listings."""
+    description = parsed.get("description", "your search")
+    size = parsed.get("size")
+    max_price = parsed.get("max_price")
+
+    size_msg = f" in size {size}" if size else ""
+    price_msg = f" under ${max_price:.0f}" if max_price is not None else ""
+
+    return (
+        f"No listings found for '{description}'{size_msg}{price_msg}. "
+        "Try broadening your search — remove the size filter, raise your price "
+        "limit, or use different keywords."
+    )
 
 
 # ── planning loop ─────────────────────────────────────────────────────────────
@@ -92,9 +151,30 @@ def run_agent(query: str, wardrobe: dict) -> dict:
     Before writing code, complete the Planning Loop and State Management sections
     of planning.md — your implementation should match what you described there.
     """
-    # TODO: implement the planning loop
     session = _new_session(query, wardrobe)
-    session["error"] = "Planning loop not yet implemented."
+
+    parsed = _parse_query(query)
+    session["parsed"] = parsed
+
+    results = search_listings(
+        parsed["description"],
+        size=parsed["size"],
+        max_price=parsed["max_price"],
+    )
+    session["search_results"] = results
+
+    if not results:
+        session["error"] = _no_results_message(parsed)
+        return session
+
+    session["selected_item"] = results[0]
+    session["outfit_suggestion"] = suggest_outfit(
+        session["selected_item"], session["wardrobe"]
+    )
+    session["fit_card"] = create_fit_card(
+        session["outfit_suggestion"], session["selected_item"]
+    )
+
     return session
 
 
@@ -112,12 +192,16 @@ if __name__ == "__main__":
         print(f"Error: {session['error']}")
     else:
         print(f"Found: {session['selected_item']['title']}")
+        print(f"State: selected_item id = {session['selected_item']['id']} "
+              f"(same as search_results[0]: {session['search_results'][0]['id']})")
         print(f"\nOutfit: {session['outfit_suggestion']}")
         print(f"\nFit card: {session['fit_card']}")
 
-    print("\n\n=== No-results path ===\n")
+    print("\n\n=== No-results path (agent skips outfit + fit card) ===\n")
     session2 = run_agent(
         query="designer ballgown size XXS under $5",
         wardrobe=get_example_wardrobe(),
     )
     print(f"Error message: {session2['error']}")
+    print(f"outfit_suggestion: {session2['outfit_suggestion']}")
+    print(f"fit_card: {session2['fit_card']}")
